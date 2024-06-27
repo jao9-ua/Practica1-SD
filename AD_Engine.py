@@ -2,7 +2,7 @@ import socket
 import threading
 import time
 import json
-from kafka import KafkaProducer, KafkaConsumer
+from confluent_kafka import Producer, Consumer, KafkaError
 import csv
 
 class Engine:
@@ -17,25 +17,22 @@ class Engine:
         self.load_figures()
         self.topic_consumer = topic_consumer
         self.topic_producer = topic_producer
-        self.producer = KafkaProducer(
-            bootstrap_servers=[f'{broker_host}:{broker_port}'],
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
-        )
-        self.consumer = KafkaConsumer(
-            self.topic_consumer,
-            bootstrap_servers=[f'{broker_host}:{broker_port}'],
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            group_id='engine'
-        )
+        self.producer = Producer({'bootstrap.servers': f'{broker_host}:{broker_port}'})
+        self.consumer = Consumer({
+            'bootstrap.servers': f'{broker_host}:{broker_port}',
+            'group.id': 'engine',
+            'auto.offset.reset': 'earliest'
+        })
+        self.consumer.subscribe([self.topic_consumer])
 
     def load_figures(self):
-        with open('figuras.txt', 'r') as file:
-            data = file.read()
-            self.figures = json.loads(data)
+        with open('AwD_figuras.json', 'r') as file:
+            data = json.load(file)
+            self.figures = data['figuras']
 
     def send_message(self, topic, drone_id, message):
         message.update({'drone_id': drone_id})
-        self.producer.send(topic, value=message)
+        self.producer.produce(topic, value=json.dumps(message))
         self.producer.flush()
 
     def start(self):
@@ -73,7 +70,7 @@ class Engine:
                     response = {'status': 'UNAUTHORIZED'}
                     client_socket.send(json.dumps(response).encode('utf-8'))
             else:
-                response = {'status': ''}
+                response = {'status': 'MAX_CAPACITY_REACHED'}
                 client_socket.send(json.dumps(response).encode('utf-8'))
         elif action == 'start':
             self.start_figure()
@@ -85,11 +82,11 @@ class Engine:
 
     def start_figure(self):
         for figure in self.figures:
-            for command in figure['commands']:
-                drone_id = command['drone_id']
-                position = command['position']
-                self.drones[drone_id]['position'] = position
-                self.send_message(self.topic, drone_id, {'action': 'move', 'position': position})
+            for drone in figure['Drones']:
+                drone_id = drone['ID']
+                pos = tuple(map(int, drone['POS'].split(',')))
+                self.drones[drone_id]['position'] = pos
+                self.send_message(self.topic_producer, drone_id, {'action': 'move', 'position': pos})
                 time.sleep(1)
             time.sleep(5)
 
@@ -99,9 +96,19 @@ class Engine:
             drone_socket['socket'].send(json.dumps(state).encode('utf-8'))
 
     def listen_to_drones(self):
-        for message in self.consumer:
-            drone_id = message.value['drone_id']
-            action = message.value.get('action')
+        while True:
+            msg = self.consumer.poll(1.0)
+            if msg is None:
+                continue
+            if msg.error():
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    continue
+                else:
+                    print(msg.error())
+                    break
+            message = json.loads(msg.value().decode('utf-8'))
+            drone_id = message['drone_id']
+            action = message.get('action')
             if action == 'arrived':
                 self.drones[drone_id]['last_seen'] = time.time()
             self.check_drones_status()
