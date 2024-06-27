@@ -1,7 +1,7 @@
 import socket
 import threading
+import time
 import json
-import random
 
 class WeatherServer:
     def __init__(self, host, port):
@@ -20,19 +20,15 @@ class WeatherServer:
 
     def handle_client(self, client_socket):
         while True:
-            message = client_socket.recv(1024).decode('utf-8')
-            if message:
-                print(f"Received message: {message}")
-                self.process_message(client_socket, message)
-
-    def process_message(self, client_socket, message):
-        message_data = json.loads(message)
-        action = message_data.get('action')
-
-        if action == 'get_weather':
-            temperature = random.uniform(-10, 30)  # Simulación de la temperatura
-            response = {'temperature': temperature}
-            client_socket.send(json.dumps(response).encode('utf-8'))
+            try:
+                with open('temperature.txt', 'r') as file:
+                    temperature = float(file.read().strip())
+                response = {'temperature': temperature}
+                client_socket.send(json.dumps(response).encode('utf-8'))
+                time.sleep(5)  # Send temperature every 5 seconds
+            except Exception as e:
+                print(f"Error: {e}")
+                break
 
 if __name__ == '__main__':
     weather_server = WeatherServer(host='127.0.0.1', port=9000)

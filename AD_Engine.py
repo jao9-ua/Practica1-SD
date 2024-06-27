@@ -24,6 +24,7 @@ class Engine:
             'auto.offset.reset': 'earliest'
         })
         self.consumer.subscribe([self.topic_consumer])
+        self.map = [[' ' for _ in range(20)] for _ in range(20)]
 
     def load_figures(self):
         with open('AwD_figuras.json', 'r') as file:
@@ -58,42 +59,49 @@ class Engine:
     def process_message(self, client_socket, message):
         message_data = json.loads(message)
         action = message_data.get('action')
+
         if action == 'authenticate':
-            if len(self.drones) < self.max_drones:
-                drone_id = message_data['drone_id']
-                stored_drones = self.read_drones_from_csv()
-                if stored_drones[drone_id] == message['token']:
-                    self.drones[drone_id] = {'socket': client_socket, 'last_seen': time.time()}
-                    response = {'status': 'REGISTERED'}
-                    client_socket.send(json.dumps(response).encode('utf-8'))
-                else:
-                    response = {'status': 'UNAUTHORIZED'}
-                    client_socket.send(json.dumps(response).encode('utf-8'))
-            else:
-                response = {'status': 'MAX_CAPACITY_REACHED'}
+            token = message_data.get('token')
+            drone_id = self.validate_token(token)
+            if drone_id:
+                position, target_position = self.assign_position(drone_id)
+                self.drones[drone_id] = {'socket': client_socket, 'position': position, 'target_position': target_position}
+                response = {'status': 'authenticated', 'position': position, 'target_position': target_position, 'map': self.map}
                 client_socket.send(json.dumps(response).encode('utf-8'))
-        elif action == 'start':
-            self.start_figure()
-        elif action == 'move':
-            drone_id = message_data['drone_id']
-            position = message_data['position']
-            self.drones[drone_id]['position'] = position
-            self.broadcast_state()
+                if len(self.drones) == len(self.figures[0]['drones']):
+                    self.broadcast_map()
+            else:
+                response = {'status': 'error', 'message': 'Invalid token'}
+                client_socket.send(json.dumps(response).encode('utf-8'))
 
-    def start_figure(self):
-        for figure in self.figures:
-            for drone in figure['Drones']:
-                drone_id = drone['ID']
-                pos = tuple(map(int, drone['POS'].split(',')))
-                self.drones[drone_id]['position'] = pos
-                self.send_message(self.topic_producer, drone_id, {'action': 'move', 'position': pos})
-                time.sleep(1)
-            time.sleep(5)
+    def validate_token(self, token):
+        with open('drones_tokens.csv', 'r') as csvfile:
+            csvreader = csv.DictReader(csvfile)
+            for row in csvreader:
+                if row['token'] == token:
+                    return row['drone_id']
+        return None
 
-    def broadcast_state(self):
-        state = {'drones': {drone_id: data['position'] for drone_id, data in self.drones.items()}}
-        for drone_socket in self.drones.values():
-            drone_socket['socket'].send(json.dumps(state).encode('utf-8'))
+    def assign_position(self, drone_id):
+        figure = self.figures[0]
+        for drone in figure['drones']:
+            if drone['id'] == drone_id:
+                return (1, 1), (drone['x'], drone['y'])  # Initial position (1,1) to target position
+
+    def check_weather(self):
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.connect((self.weather_host, self.weather_port))
+                    while True:
+                        response = sock.recv(1024).decode('utf-8')
+                        if response:
+                            response_data = json.loads(response)
+                            temperature = response_data.get('temperature')
+                            print(f"Current temperature: {temperature}")
+            except Exception as e:
+                print(f"Weather check error: {e}")
+            time.sleep(5)  # Check every 5 seconds
 
     def listen_to_drones(self):
         while True:
@@ -105,58 +113,42 @@ class Engine:
                     continue
                 else:
                     print(msg.error())
-                    break
+                    continue
             message = json.loads(msg.value().decode('utf-8'))
-            drone_id = message['drone_id']
-            action = message.get('action')
-            if action == 'arrived':
-                self.drones[drone_id]['last_seen'] = time.time()
-            self.check_drones_status()
+            self.process_drone_message(message)
 
-    def check_drones_status(self):
-        current_time = time.time()
-        for drone_id, drone_data in list(self.drones.items()):
-            if current_time - drone_data['last_seen'] > 10:
-                print(f"Drone {drone_id} is absent, unregistering.")
-                del self.drones[drone_id]
+    def process_drone_message(self, message):
+        drone_id = message.get('drone_id')
+        action = message.get('action')
+        if action == 'position':
+            position = message.get('position')
+            self.update_map(drone_id, position)
+            print(f"Drone {drone_id} moved to {position}")
+            self.broadcast_map()
+        elif action == 'complete':
+            print(f"Drone {drone_id} completed its task")
 
-    def check_weather(self):
-        while True:
-            weather_data = self.get_weather()
-            if weather_data['temperature'] < 0:
-                self.stop_show()
-            time.sleep(60)
+    def update_map(self, drone_id, position):
+        for i in range(20):
+            for j in range(20):
+                if self.map[i][j] == drone_id:
+                    self.map[i][j] = ' '
+        self.map[position[0]][position[1]] = drone_id
 
-    def get_weather(self):
-        weather_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        weather_socket.connect((self.weather_host, self.weather_port))
-        weather_socket.send(json.dumps({'action': 'get_weather'}).encode('utf-8'))
-        weather_data = json.loads(weather_socket.recv(1024).decode('utf-8'))
-        weather_socket.close()
-        return weather_data
-
-    def stop_show(self):
-        for drone_socket in self.drones.values():
-            drone_socket['socket'].send(json.dumps({'action': 'stop'}).encode('utf-8'))
-
-    def read_drones_from_csv(self):
-        drones = {}
-        with open("drones_token.csv", mode='r') as csvfile:
-            csvreader = csv.DictReader(csvfile)
-            for row in csvreader:
-                drone_id = row['drone_id']
-                token = row['token']
-                drones[drone_id] = token
-        return drones
+    def broadcast_map(self):
+        for drone_id in self.drones:
+            self.send_message(self.topic_producer, drone_id, {'action': 'update_map', 'map': self.map})
 
 if __name__ == '__main__':
-    engine = Engine(host='127.0.0.1',
-                    port=8000,
-                    max_drones=10,
-                    weather_host='127.0.0.1',
-                    weather_port=9000,
-                    topic_producer="drone_command",
-                    topic_consumer="drone_answer",
-                    broker_host="localhost",
-                    broker_port=9092)
+    engine = Engine(
+        host='127.0.0.1',
+        port=8000,
+        max_drones=10,
+        weather_host='127.0.0.1',
+        weather_port=9000,
+        topic_producer="drone_command",
+        topic_consumer="drone_answer",
+        broker_host="localhost",
+        broker_port=9092
+    )
     engine.start()

@@ -1,3 +1,4 @@
+import sys
 import socket
 import threading
 import json
@@ -57,8 +58,15 @@ class Registry:
 
     def write_to_file(self, token, drone_id):
         with open('drones_tokens.csv', 'a') as file:
-            file.write(f'{drone_id}, {drone_id}, {token}\\n')
+            file.write(f'{drone_id}, {drone_id}, {token}\n')
 
 if __name__ == '__main__':
-    registry = Registry(host='127.0.0.1', port=8001)
+    if len(sys.argv) != 3:
+        print("Usage: python AD_Registry.py <host> <port>")
+        sys.exit(1)
+
+    host = sys.argv[1]
+    port = int(sys.argv[2])
+
+    registry = Registry(host=host, port=port)
     registry.start()

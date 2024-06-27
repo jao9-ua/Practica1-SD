@@ -2,8 +2,8 @@ import socket
 import json
 import time
 import sys
-import networkx as nx
 from kafka import KafkaConsumer, KafkaProducer
+import networkx as nx
 
 class Drone:
     def __init__(self, drone_id, engine_ip, engine_port, registry_ip, registry_port, broker_ip, broker_port, topic_consumer, topic_producer):
@@ -17,7 +17,9 @@ class Drone:
         self.topic_consumer = topic_consumer
         self.topic_producer = topic_producer
         self.token = None
-        self.position = [1, 1]  # Default starting position
+        self.position = None  # Default starting position
+        self.target_position = None
+        self.map = None
 
     def start(self):
         self.register()
@@ -47,7 +49,15 @@ class Drone:
                 sock.connect((self.engine_ip, self.engine_port))
                 auth_message = json.dumps({'action': 'authenticate', 'token': self.token})
                 sock.sendall(auth_message.encode('utf-8'))
-                print("Authenticated with the engine.")
+                response = sock.recv(1024).decode('utf-8')
+                response_data = json.loads(response)
+                if response_data['status'] == 'authenticated':
+                    self.position = response_data['position']
+                    self.target_position = response_data['target_position']
+                    self.map = response_data['map']
+                    print(f"Authenticated to engine with position: {self.position} and target: {self.target_position}")
+                else:
+                    print("Authentication failed. Response:", response_data)
         except Exception as e:
             print(f"Authentication error: {e}")
 
@@ -68,19 +78,24 @@ class Drone:
             print(f"Kafka connection error: {e}")
 
     def process_message(self, message, producer):
-        if message['action'] == 'move' and message['drone_id'] == self.drone_id:
-            self.move(message['position'], producer)
+        if message['action'] == 'update_map':
+            self.map = message['map']
+            self.move(producer)
 
-    def move(self, target, producer):
+    def move(self, producer):
         graph = nx.grid_2d_graph(20, 20)  # Create a 20x20 grid
         try:
-            path = nx.astar_path(graph, tuple(self.position), tuple(target), heuristic=self.manhattan_distance)
+            path = nx.astar_path(graph, tuple(self.position), tuple(self.target_position), heuristic=self.manhattan_distance)
             for next_position in path[1:]:  # Skip the first element as it is the current position
                 self.position = next_position
                 print(f"Moving to {self.position}")
                 producer.send(self.topic_producer, {'action': 'position', 'drone_id': self.drone_id, 'position': self.position})
                 producer.flush()
                 time.sleep(1)  # Simulate movement delay
+                if self.position == self.target_position:
+                    producer.send(self.topic_producer, {'action': 'complete', 'drone_id': self.drone_id})
+                    producer.flush()
+                    break
         except nx.NetworkXNoPath:
             print("No path to target.")
 
@@ -92,7 +107,7 @@ if __name__ == '__main__':
     if len(sys.argv) != 8:
         print("Usage: python AD_Drone.py <DroneID> <EngineIP> <EnginePort> <RegistryIP> <RegistryPort> <BrokerIP> <BrokerPort>")
         sys.exit(1)
-    
+
     drone_id = int(sys.argv[1])
     engine_ip = sys.argv[2]
     engine_port = int(sys.argv[3])
@@ -100,6 +115,6 @@ if __name__ == '__main__':
     registry_port = int(sys.argv[5])
     broker_ip = sys.argv[6]
     broker_port = int(sys.argv[7])
-    
+
     drone = Drone(drone_id, engine_ip, engine_port, registry_ip, registry_port, broker_ip, broker_port, 'drone_answer', 'drone_command')
     drone.start()
